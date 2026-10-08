@@ -1,0 +1,330 @@
+---
+title: 'NYPD Shooting Incident Report: Analysis of the ARCHIVED_NYPD Shooting Incident
+  Data (Historic)'
+author: "CU Boulder MSDS Student"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# NYPD Shooting Incident Dataset
+
+This analysis explores the *ARCHIVED_NYPD Shooting Incident Data (Historic)* from the City of New York. According to the dataset info, "The data contains a breakdown of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year. Each record represents a shooting incident in NYC
+and includes information about the event, the location and time of occurrence, and suspect and victim demographics." It covers the years 2006-2024. This dataset only contains shootings where there was an injured victim.\* 
+
+**Question of interest:** Where in NYC do shootings occur, who are the victims in terms of age, race and sex, and how have victim counts changed from year to year, including whether male and female victim counts rise and fall together?
+
+This analysis also considers what this data can and can't tell us, gaps in the dataset, and questions that would require additional outside data to answer.
+
+- Source dataset page: [data.gov listing](https://catalog.data.gov/dataset/archived_nypd-shooting-incident-data-historic?from_hint=eyJxIjoibnlwZCBzaG9vdGluZyBpbmNpZGVudCBkYXRhIn0%3D)
+- CSV used in this analysis: [export.csv](https://data.cityofnewyork.us/api/v3/views/833y-fsy8/export.csv?accessType=DOWNLOAD)
+- Data dictionary and footnotes: [NYC Open Data page](https://data.cityofnewyork.us/Public-Safety/ARCHIVED_NYPD-Shooting-Incident-Data-Historic-/833y-fsy8/about_data)
+
+*There is a note at the beginning of this dataset that encourages users to access its replacement, which is broken into three datasets: 1. shootings, 2. shooting victims, and 3. shooting offenders, with the intent that it's easier to use for shootings where multiple victims or offenders are involved. For the purposes of this assignment, though,
+we will use the historic dataset included in the assignment instructions.*
+
+\*From footnote 14 in the footnotes: "Only valid shooting incidents resulting in an injured victim are included in this release. Shooting incidents not resulting in an injured victim are classified according to the appropriate offense according to NYS Penal Law."
+
+
+
+## Importing the data
+
+First, load the required packages:
+
+```{r load-packages, message=FALSE}
+library(tidyverse)
+library(lubridate)
+```
+
+Read in the NYPD Shooting Incident data:
+
+```{r import-data, message=FALSE}
+url_in <- "https://data.cityofnewyork.us/api/v3/views/833y-fsy8/export.csv"
+NYPD_data <- read_csv(url_in)
+```
+
+Check the size of the dataset
+
+```{r data-dimensions}
+dim(NYPD_data)
+```
+
+The data has 29,744 rows and 21 columns.
+
+The dataset describes each record as a shooting incident, but some incidents involve more than one victim. Count the distinct `INCIDENT_KEY` values to see how many separate incidents there are:
+
+```{r distinct-incidents}
+n_distinct(NYPD_data$INCIDENT_KEY)
+```
+
+There are 23,298 distinct incidents but 29,744 rows, so each row is best understood as one victim record. Counts in this report are counts of victims, not distinct incidents.
+
+Next, use `spec()` to retrieve the full column specification for the data:
+
+```{r spec-check}
+spec(NYPD_data)
+```
+
+## Tidying and Transforming the Data
+
+Tidy the dataset by first seeing what each column contains. Use `glimpse()` to get an overview of the raw data structure:
+
+```{r glimpse-data}
+glimpse(NYPD_data)
+```
+
+After viewing the columns, use `select()` to keep only the columns
+needed for this analysis, dropping the rest: `OCCUR_TIME`, `PRECINCT`,
+`LOC_OF_OCCUR_DESC`, `LOC_CLASSFCTN_DESC`, `LOCATION_DESC`,
+`STATISTICAL_MURDER_FLAG`, `PERP_AGE_GROUP`, `JURISDICTION_CODE`, `X_COORD_CD`, `Y_COORD_CD`,
+and `Lon_Lat`. Drop `X_COORD_CD`, `Y_COORD_CD`, and `Lon_Lat`
+because `Latitude`/`Longitude` can map shooting
+locations. 
+
+*The remaining dropped columns (`OCCUR_TIME`, `PRECINCT`,
+`LOC_OF_OCCUR_DESC`, `LOC_CLASSFCTN_DESC`, `LOCATION_DESC`,
+`STATISTICAL_MURDER_FLAG`, `JURISDICTION_CODE` and `PERP_AGE_GROUP`) aren't part of the
+demographic and geographic questions this analysis
+focuses on.*
+
+```{r select-columns}
+NYPD_data <- NYPD_data %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  select(INCIDENT_KEY, OCCUR_DATE, BORO,
+         Latitude, Longitude,
+         PERP_SEX, PERP_RACE,
+         VIC_SEX, VIC_RACE, VIC_AGE_GROUP)
+```
+
+Next, spell out "Victim" instead of "Vic," renaming `VIC_SEX`,
+`VIC_RACE`, and `VIC_AGE_GROUP` to be more descriptive:
+
+```{r rename-columns}
+NYPD_data <- NYPD_data %>%
+  rename(`VICTIM SEX` = VIC_SEX,
+         `VICTIM RACE` = VIC_RACE,
+         `VICTIM AGE GROUP` = VIC_AGE_GROUP)
+```
+
+Count where Null is occurring in the dataset to decide how to
+deal with unknown categories. Do that by converting null to NA in
+order to count it:
+
+```{r count-nulls}
+# Only PERP_SEX and PERP_RACE actually contain "(null)", so name them
+# directly instead of checking every column
+NYPD_data <- NYPD_data %>%
+  mutate(PERP_SEX = na_if(PERP_SEX, "(null)"),
+         PERP_RACE = na_if(PERP_RACE, "(null)"))
+
+colSums(is.na(NYPD_data))
+```
+
+Perpetrator Race and Sex is missing for 10,938 incidents. There is no null
+for Victim Sex and Race. This could reflect shooting incidents where the
+perpetrator was never identified. Recode the missing values and "U" as "UNKNOWN".
+
+```{r recode-unknown}
+NYPD_data <- NYPD_data %>%
+  mutate(PERP_SEX = if_else(is.na(PERP_SEX) | PERP_SEX == "U", "UNKNOWN", PERP_SEX),
+         PERP_RACE = replace_na(PERP_RACE, "UNKNOWN"),
+         `VICTIM SEX` = if_else(`VICTIM SEX` == "U", "UNKNOWN", `VICTIM SEX`))
+```
+
+With the missing values recoded, the categorical columns can now be
+converted to factors:
+
+```{r convert-factors}
+NYPD_data <- NYPD_data %>%
+  mutate(BORO = factor(BORO),
+         PERP_SEX = factor(PERP_SEX),
+         PERP_RACE = factor(PERP_RACE),
+         `VICTIM SEX` = factor(`VICTIM SEX`),
+         `VICTIM RACE` = factor(`VICTIM RACE`),
+         `VICTIM AGE GROUP` = factor(`VICTIM AGE GROUP`))
+```
+
+## Confirming the Cleanup
+
+Re-checking for missing data 
+
+```{r recheck-nulls}
+# Re-check confirming the "UNKNOWN" recoding zeroed out PERP_SEX/PERP_RACE
+colSums(is.na(NYPD_data))
+```
+
+`PERP_SEX` and `PERP_RACE` now show 0 missing values, since every prior `NA` was replaced
+with `"UNKNOWN"` before the factor conversion.
+
+`Latitude` and `Longitude` still have a small number of missing values.
+These rows will be excluded from any map-based visualizations, but retained for non-spatial analysis.
+
+Run `summary()` on the cleaned dataset
+
+```{r summary-data}
+# Summary of the cleaned dataset
+summary(NYPD_data)
+```
+
+Summary confirms the date range this analysis covers — `OCCUR_DATE`
+runs from 2006-01-01 to 2024-12-31 — and gives a first full look at the
+shape of the cleaned dataset across every column at once. The borough,
+sex, race, and age distributions visible here are explored individually
+in the visualizations below.
+
+## Additional Cleaning While Doing Analysis
+
+When creating visualizations, I discovered that the Victim Age Group has an age category of "1022." This doesn't match any real age category and is likely an error in the data. To see how often this occurred I ran a count on "1022"
+
+```{r count-age-groups}
+NYPD_data %>% count(`VICTIM AGE GROUP`)
+```
+
+This revealed one invalid entry, `"1022"` (a single row). Every other
+value in the column is a legitimate category (`<18`, `18-24`, `25-44`,
+`45-64`, `65+`) or the dataset's existing `"UNKNOWN"` label (68 rows).
+Looking at that specific row confirms the error:
+
+```{r check-invalid-row}
+NYPD_data %>% filter(`VICTIM AGE GROUP` == "1022")
+```
+
+This shows `INCIDENT_KEY` 248480012, and nothing else about that row looks unusual. The invalid entry was cleaned and recoded to `"UNKNOWN"`.
+
+```{r clean-age-group}
+# Recode invalid VICTIM AGE GROUP values to "UNKNOWN"
+valid_age_groups <- c("<18", "18-24", "25-44", "45-64", "65+")
+
+NYPD_data <- NYPD_data %>%
+  mutate(`VICTIM AGE GROUP` = factor(if_else(`VICTIM AGE GROUP` %in% valid_age_groups,
+                                            as.character(`VICTIM AGE GROUP`),
+                                            "UNKNOWN"),
+                                    levels = c(valid_age_groups, "UNKNOWN")))
+```
+
+## Visualizations 
+
+### Shooting Victims by Borough
+
+```{r viz-boro-counts}
+# Bar chart of shooting victims by borough
+NYPD_data %>%
+  ggplot(aes(x = BORO)) +
+  geom_bar() +
+  labs(title = "Shooting Victims by Borough",
+       x = "Borough", y = "Number of Victims")
+```
+
+Brooklyn has by far the most victims (11,685), followed by the Bronx (8,834) and Staten Island has the fewest (822). Without population data, it's difficult to extrapolate information from this data beyond a count. With population data added in, it would be informative to do a per capita evaluation.
+
+### Shooting Locations Across NYC, by Borough
+
+```{r viz-nyc-map, fig.width=10, fig.height=8}
+# Single Borough-wide map, points colored by borough
+NYPD_data %>%
+  filter(!is.na(Latitude), !is.na(Longitude)) %>%
+  ggplot(aes(x = Longitude, y = Latitude, color = BORO)) +
+  geom_point(alpha = 0.4, size = 0.6) +
+  coord_fixed() +
+  labs(title = "Shooting Locations Across NYC, by Borough",
+       x = "Longitude", y = "Latitude", color = "Borough") +
+  guides(color = guide_legend(override.aes = list(size = 4, alpha = 1)))
+```
+
+This map shows every shooting record with recorded geographic coordinates in the dataset, with each record represented by a colored dot that corresponds to the borough where it occurred.
+
+### Shooting Victims by Age Group and Sex
+
+```{r viz-victim-age}
+# Victim age group in a stack with Victim Sex
+NYPD_data %>%
+  filter(`VICTIM SEX` %in% c("F", "M")) %>%
+  ggplot(aes(x = `VICTIM AGE GROUP`, fill = `VICTIM SEX`)) +
+  geom_bar(position = position_stack(reverse = TRUE)) +
+  labs(title = "Shooting Victims by Age Group and Sex",
+       x = "Victim Age Group", y = "Number of Victims", fill = "Victim Sex") +
+  scale_fill_manual(values = c("F" = "orange", "M" = "navy"))
+```
+
+Victims aged 25-44 are the most impacted age group for both males and females, followed by victims aged 18-24.
+
+### Shooting Victims by Race
+
+```{r viz-victim-race}
+# Victims by race
+NYPD_data %>%
+  ggplot(aes(x = `VICTIM RACE`, fill = `VICTIM RACE`)) +
+  geom_bar() +
+  labs(title = "Shooting Victims by Race",
+       x = "Victim Race", y = "Number of Victims") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+Black victims disproportionately outnumber other races, comprising the large majority of shooting victims in this dataset. This reflects a raw count and not a population-adjusted rate.
+
+### Shooting Victims by Year and Borough
+
+The dataset covers 19 years, so the date column can show how victim counts have changed over time. Count victims per year in each borough and plot them as lines:
+
+```{r viz-yearly-boro}
+# Shooting victims per year, one line per borough
+NYPD_data %>%
+  mutate(year = year(OCCUR_DATE)) %>%
+  count(year, BORO) %>%
+  ggplot(aes(x = year, y = n, color = BORO)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Shooting Victims by Year and Borough",
+       x = "Year", y = "Number of Victims", color = "Borough")
+```
+
+Victim counts fell in every borough from 2006 until about 2017-2019, when the citywide total was under 1,000 victims per year (down from 2,055 in 2006). In 2020 the total roughly doubled to 1,948 and peaked at 2,011 in 2021, with every borough rising. Counts have fallen since, to 1,182 in 2024. Brooklyn has the most victims in 16 of the 19 years, but the Bronx has been highest in three of the last four (2021, 2023 and 2024). This chart shows when the changes happened, but not why.
+
+## Modeling
+
+### Modeling Year by Year Shooting Counts
+
+For this model, I wanted to see if the number of female victims and male victims increased or decreased together year over year. 
+
+```{r yearly_sex_counts}
+yearly_sex_counts <- NYPD_data %>%
+  filter(`VICTIM SEX` %in% c("F", "M")) %>%
+  mutate(year = year(OCCUR_DATE)) %>%
+  count(year, `VICTIM SEX`) %>%
+  pivot_wider(names_from = `VICTIM SEX`, values_from = n)
+
+mod <- lm(F ~ M, data = yearly_sex_counts)
+summary(mod)
+```
+
+This model estimates that every additional male victim in a given year is associated with about 0.097 female victims in that same year. Therefore, for every 10 additional male victims in a given year, there is about 1 additional female victim in that same year. This modeling suggests that male and female victim counts move together. It doesn't tell us what factors contribute to the rise or fall in shootings in a given year.
+
+This relationship is very unlikely to be due to chance (p = 1e-06). The model also explains about 76% of the year-to-year variation in female victim counts (R² = 0.76), which is a fairly strong relationship. Both counts follow the same overall rise and fall over time (see the yearly chart above), which is part of why they move together. This model is based on 19 years of data, so it's a small number of data points to draw a strong conclusion from.
+
+## Additional Analysis
+
+Beyond the analysis listed with the visualizations, this assignment raises additional questions worth investigating. For example: 
+
+  * How do victim rates in each borough compare once population data is added? This would require adding a population dataset by borough, such as U.S. Census data.
+  * How can **neighborhood-level data** help to illuminate patterns that this dataset alone can't distinguish? 
+  * This dataset only uses M, F and UNKNOWN for sex and has no category for nonbinary. Are there other datasets that can help understand shooting incidents from this perspective? 
+  * How do victim rates compare across race and how does that compare with population data?
+
+## Conclusion
+
+### Bias Statement
+
+I have previously worked on datasets that track race and public health outcomes and I approach datasets like these looking for bias in the dataset. That approach carries skepticism by nature. This dataset is made by law enforcement and my bias is that it carries with it a level of secrecy. It's our responsibility to question data and why they are made. I mitigate risk of bias by describing data as raw counts, rather than rates, and avoiding claims about why a pattern exists. The notes throughout this report are meant to make clear what can and can't be done with this data.
+
+### Conclusion
+
+This analysis examines NYPD shooting incidents by boroughs, over the 19 years the dataset covers (2006-2024) and by victim demographics. This dataset shows that the majority of shooting victims are male. Victims age 25-44 make up the largest age group of victims and the majority of shooting victims are Black. Modeling male and female victim counts by year shows that for every 10 additional male victims in a given year, there is about 1 additional female victim in that same year. This modeling suggests that male and female victim counts move together. It doesn't tell us what factors contributed to a rise or fall in shootings in a given year. The analysis also shows where shootings occur across all five boroughs, with Brooklyn having the most victims at 11,685, followed by the Bronx with 8,834. Victim counts fell in every borough through about 2017-2019, roughly doubled in 2020, peaked in 2021, and have fallen since. Without population data, it's difficult to calculate whether this makes one location more prone to shootings than another. We can only determine a raw count of victims in reported shootings. From this analysis, we can see where shootings occur, how the counts have changed over time, and which groups of people are disproportionately impacted.
+
+In closing, it's important to mention that this report only includes shootings where a victim was injured and it was reported to the police and therefore does not cover all shootings. As a result, this dataset does not represent frequency of gunfire in NYC.
+
